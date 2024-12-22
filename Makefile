@@ -1,6 +1,5 @@
 CFLAGS=-Wall -Wextra --std=c99 -O2
 CUPSDIR=$(shell cups-config --serverbin)
-CUPSDATADIR=$(shell cups-config --datadir)
 
 all:	carps-decode rastertocarps ppd/*.ppd
 
@@ -12,11 +11,12 @@ rastertocarps:	rastertocarps.c carps.h
 
 ppd/*.ppd: carps.drv
 	ppdc carps.drv
+	@echo "Cleaning *NickName entries..."
+	sed -i '' 's/, "/"/g' ppd/*.ppd
+	./insert_icons_mac.sh
 
 clean:
-	rm -f carps-decode rastertocarps
+	rm -rf carps-decode rastertocarps ppd/
 
 install: rastertocarps
 	install -s rastertocarps $(CUPSDIR)/filter/
-	install -m 644 carps.drv $(CUPSDATADIR)/drv/
-	install -m 644 carps.usb-quirks $(CUPSDATADIR)/usb/
