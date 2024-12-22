@@ -1,0 +1,7 @@
+canon_mf3110.ppd /Library/Printers/Canon/Icon/Canon_MF3110.icns
+canon_mf5630.ppd /Library/Printers/Canon/Icon/Canon_MF5630_MF5650.icns
+canon_mf5650.ppd /Library/Printers/Canon/Icon/Canon_MF5630_MF5650.icns
+canon_mf5730.ppd /Library/Printers/Canon/Icon/Canon_MF5730_MF5750_MF5770.icns
+canon_mf5750.ppd /Library/Printers/Canon/Icon/Canon_MF5730_MF5750_MF5770.icns
+canon_mf5770.ppd /Library/Printers/Canon/Icon/Canon_MF5730_MF5750_MF5770.icns
+canon_icd300.ppd /Library/Printers/Canon/Icon/Canon_icd300.icns
