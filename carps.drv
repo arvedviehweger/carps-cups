@@ -43,31 +43,31 @@ Option "TonerSave/Toner Save" PickOne AnySetup 10
 
 Throughput 20
 {
-	ModelName "LaserBase MF5730"
+	ModelName "MF5730"
 	PCFileName "canon_mf5730.ppd"
 }
 {
-	ModelName "LaserBase MF5750"
+	ModelName "MF5750"
 	PCFileName "canon_mf5750.ppd"
 }
 {
-	ModelName "LaserBase MF5770"
+	ModelName "MF5770"
 	PCFileName "canon_mf5770.ppd"
 }
 
 Throughput 18
 {
-	ModelName "LaserBase MF5630"
+	ModelName "MF5630"
 	PCFileName "canon_mf5630.ppd"
 }
 {
-	ModelName "LaserBase MF5650"
+	ModelName "MF5650"
 	PCFileName "canon_mf5650.ppd"
 }
 
 {
 	Throughput 21
-	ModelName "LaserBase MF3110"
+	ModelName "MF3110"
 	PCFileName "canon_mf3110.ppd"
 }
 
