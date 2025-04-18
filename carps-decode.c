@@ -33,7 +33,21 @@ void dump_data(u8 *data, u16 len) {
 	printf("\n");
 }
 
+void print_time(struct carps_time *time) {
+	char *weekday[] = { "", "MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN" };
+	printf("Time: %04d-%02d-%02d (%s) %02d:%02d:%02d.%d\n",
+		(time->year << 4) | (time->year_month >> 4),
+		time->year_month & 0x0f,
+		time->day >> 3,
+		weekday[time->day & 0x7],
+		time->hour,
+		time->min,
+		time->sec_msec >> 2,
+		((time->sec_msec & 0x3) << 8) | time->msec);
+}
+
 long block_pos;
+enum carps_compression compression = COMPRESS_CANON;
 
 #define NO_HEADER	(1 << 0)
 int get_block(u8 *buf, FILE *f, int flags) {
@@ -145,7 +159,7 @@ int decode_number(u8 **data, u16 *len, u8 *bitpos) {
 u8 *last_lines[8], *cur_line;
 int out_bytes;
 u16 line_num, line_pos, line_len;
-bool output_header, header_written;
+bool output_header;
 long height_pos;
 
 void next_line(void) {
@@ -217,24 +231,41 @@ void output_previous(int line, int count, FILE *fout) {
 
 #define TMP_BUFLEN 100
 
-int decode_print_data(u8 *data, u16 len, FILE *f, FILE *fout) {
+int decode_print_data(u8 *data, u16 len, FILE *f, FILE **fout) {
 	bool in_escape = false;
+	static bool start_of_strip = true;
 	int i;
 	int count;
 	int base = 0;
 	u8 dictionary[DICT_SIZE];
 	bool twobyte_flag = false, prev8_flag = false;
 	char tmp[TMP_BUFLEN];
-	int width, height;
+	static int width, page = 1;
+	int height;
+	char filename[30];
 
 	u8 *start = data;
-
-	memset(dictionary, 0xaa, DICT_SIZE);
 
 	if (data[0] != 0x01)
 		printf("!!!!!!!!");
 
-	for (i = 1; i < len; i++) {
+	if (len == 2 && data[1] == 0x0c) {
+		printf("end of page\n");
+		start_of_strip = true;
+		/* now we know line count so we can fill it in */
+		if (compression == COMPRESS_CANON && output_header) {
+			fseek(*fout, height_pos, SEEK_SET);
+			fprintf(*fout, "%4d", line_num);
+		}
+		fclose(*fout);
+		*fout = NULL;
+		page++;
+		line_num = 0;
+		return 0;
+	}
+
+	/* read and display escape sequences at start of strip */
+	for (i = 1; start_of_strip && i < len; i++) {
 		if (data[i] == ESC) {	/* escape sequence begin */
 			if (in_escape)
 				printf("\n");
@@ -256,28 +287,56 @@ int decode_print_data(u8 *data, u16 len, FILE *f, FILE *fout) {
 		}
 		strncpy(tmp, (char *)data + 3, i);
 		tmp[i] = '\0';
-		sscanf(tmp, ";%d;%d;", &width, &height);
-		printf("width=%d, height=%d\n", width, height);
-		line_len = ROUND_UP_MULTIPLE(DIV_ROUND_UP(width, 8), 4);
-		printf("line_len=%d\n", line_len);
-		cur_line = realloc(cur_line, line_len);
-		for (int i = 0; i < 8; i++)
-			last_lines[i] = realloc(last_lines[i], line_len);
-
-		if (output_header && !header_written) {
-			fprintf(fout, "P4\n%d ", line_len * 8);
-			height_pos = ftell(fout);
-			fprintf(fout, "%4d\n", 0); /* we don't know height yet */
-			header_written = true;
+		int comp;
+		sscanf(tmp, ";%d;%d;%d.", &width, &height, &comp);
+		printf(" width=%d, height=%d, compression=%d\n", width, height, comp);
+		if (comp != COMPRESS_CANON && comp != COMPRESS_G4)
+			printf("UNKNOWN COMPRESSION TYPE!!!!!!!!\n");
+		compression = comp;
+		if (compression == COMPRESS_CANON) {
+			line_len = ROUND_UP_MULTIPLE(DIV_ROUND_UP(width, 8), 4);
+			printf("line_len=%d\n", line_len);
+			cur_line = realloc(cur_line, line_len);
+			for (int i = 0; i < 8; i++)
+				last_lines[i] = realloc(last_lines[i], line_len);
 		}
 	}
 
 	data += i;
 	len -= i;
+
+	if (!*fout && len > 0) {
+		snprintf(filename, sizeof(filename), "decoded-p%d.%s", page, (compression == COMPRESS_CANON) ? "pbm" : "g4");
+		printf("\ncreating output file %s", filename);
+		if (compression == COMPRESS_G4)
+			printf(" - use 'fax2tiff -4 -8 -X %d %s -o decoded-p%d.tiff' to convert", width, filename, page);
+		printf("\n");
+		*fout = fopen(filename, "w");
+		if (!*fout) {
+			perror("Unable to open output file");
+			return 2;
+		}
+		if (compression == COMPRESS_CANON && output_header) {
+			fprintf(*fout, "P4\n%d ", line_len * 8);
+			height_pos = ftell(*fout);
+			fprintf(*fout, "%4d\n", 0); /* we don't know height yet */
+		}
+	}
+
+	if (len > 0)
+		start_of_strip = false;
+
+	if (compression == COMPRESS_G4 && len > 0) {
+		printf("%d bytes of G4 data\n", len);
+		fwrite(data, 1, len, *fout);
+		return 0;
+	}
 	if (len < sizeof(struct carps_print_header)) {
 		printf("\n");
 		return -1;
 	}
+
+	memset(dictionary, 0xaa, DICT_SIZE);
 
 	struct carps_print_header *header = (void *)data;
 	if (header->one != 0x01 || header->two != 0x02 || header->four != 0x04 || header->eight != 0x08 || header->zero1 != 0x0000 || header->magic != 0x50
@@ -333,7 +392,7 @@ int decode_print_data(u8 *data, u16 len, FILE *f, FILE *fout) {
 							switch (bits) {
 							case 0b01:
 								printf("zero byte\n");
-								output_byte(0, dictionary, fout);
+								output_byte(0, dictionary, *fout);
 								break;
 							case 0b00:
 								count = decode_number(&data, &len, &bitpos);
@@ -341,7 +400,8 @@ int decode_print_data(u8 *data, u16 len, FILE *f, FILE *fout) {
 								base = count * 128;
 								break;
 							case 0b10:
-								printf("block end marker\n");
+								printf("strip end marker\n");
+								start_of_strip = true;
 								return 0;
 							default:
 								printf("!!!!!!!! 0b%s\n", bin_n(bits, 2));
@@ -354,13 +414,13 @@ int decode_print_data(u8 *data, u16 len, FILE *f, FILE *fout) {
 					} else { /* 11110 */
 						count = decode_number(&data, &len, &bitpos);
 						printf("%d bytes from this line [@-80]\n", count);
-						output_bytes_last(count, 80, fout);
+						output_bytes_last(count, 80, *fout);
 					}
 					break;
 				case 0b01: /* 1101 */
 					bits = get_bits(&data, &len, &bitpos, 8);
 					printf("byte immediate 0b%s\n", bin_n(bits, 8));
-					output_byte(bits, dictionary, fout);
+					output_byte(bits, dictionary, *fout);
 					break;
 				case 0b00: /* 1100 */
 					go_backward(1, &data, &len, &bitpos);
@@ -370,7 +430,7 @@ int decode_print_data(u8 *data, u16 len, FILE *f, FILE *fout) {
 				case 0b10: /* 1110 */
 					count = decode_number(&data, &len, &bitpos);
 					printf("%d last bytes (+%d)\n", count + base, base);
-					output_bytes_last(count + base, twobyte_flag ? 2 : 1, fout);
+					output_bytes_last(count + base, twobyte_flag ? 2 : 1, *fout);
 					base = 0;
 					break;
 				}
@@ -378,12 +438,12 @@ int decode_print_data(u8 *data, u16 len, FILE *f, FILE *fout) {
 				/* DICTIONARY */
 				bits = get_bits(&data, &len, &bitpos, 4);
 				printf("[%d] byte from dictionary\n", (~bits & 0b1111));
-				output_byte(dictionary[(~bits & 0b1111)], dictionary, fout);
+				output_byte(dictionary[(~bits & 0b1111)], dictionary, *fout);
 			}
 		} else { /* 0 */
 			count = decode_number(&data, &len, &bitpos);
 			printf("%d bytes from previous line (+%d)\n", count + base, base);
-			output_previous(prev8_flag ? 7 : 3, count + base, fout);
+			output_previous(prev8_flag ? 7 : 3, count + base, *fout);
 			base = 0;
 		}
 	}
@@ -403,7 +463,7 @@ int main(int argc, char *argv[]) {
 	u8 *data = buf + sizeof(struct carps_header);
 	int ret;
 	u16 len;
-	char *weekday[] = { "", "MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN" };
+	FILE *fout = NULL;
 
 	if (argc < 2) {
 		usage();
@@ -414,11 +474,7 @@ int main(int argc, char *argv[]) {
 		perror("Unable to open file");
 		return 2;
 	}
-	FILE *fout = fopen("decoded.pbm", "w");
-	if (!fout) {
-		perror("Unable to open output file");
-		return 2;
-	}
+
 	if (argc > 2 && !strcmp(argv[2], "--header"))
 		output_header = true;
 
@@ -440,7 +496,6 @@ int main(int argc, char *argv[]) {
 		}
 		case CARPS_BLOCK_DOC_INFO: {
 			struct carps_doc_info *info = (void *)data;
-			struct carps_time *time;
 			printf("DOCUMENT INFORMATION: ");
 			u16 type = be16_to_cpu(info->type);
 			u16 unknown = be16_to_cpu(info->unknown);
@@ -458,20 +513,50 @@ int main(int argc, char *argv[]) {
 				printf("User: '%s'\n", data + sizeof(struct carps_doc_info));
 				break;
 			case CARPS_DOC_INFO_TIME:
-				time = (void *)data;
-				printf("Time: %04d-%02d-%02d (%s) %02d:%02d:%02d.%d\n",
-					(time->year << 4) | (time->year_month >> 4),
-					time->year_month & 0x0f,
-					time->day >> 3,
-					weekday[time->day & 0x7],
-					time->hour,
-					time->min,
-					time->sec_msec >> 2,
-					((time->sec_msec & 0x3) << 8) | time->msec);
+				print_time((void *)data + 2);
 				break;
 			default:
 				printf("Unknown: type=0x%x, unknown=0x%x, data_len=0x%x\n", type, unknown, info->data_len);
 				break;
+			}
+			break;
+		}
+		case CARPS_BLOCK_DOC_INFO_NEW: {
+			printf("DOCUMENT INFORMATION (NEW TYPE): ");
+			u16 record_count = be16_to_cpu(*(u16 *)data);
+			printf("%d records\n", record_count);
+			u8 *record = data + 2;
+			for (int i = 0; i < record_count; i++) {
+				printf(" #%d: ", i + 1);
+				struct carps_doc_info_new *info = (void *)record;
+				u16 type = be16_to_cpu(info->type);
+				u16 data_len = be16_to_cpu(info->data_len);
+				switch (type) {
+					case CARPS_DOC_INFO_TITLE: {
+						u16 unknown = be16_to_cpu(*(u16 *)info->data);
+						if (unknown != 0x11)
+							printf("!!!!!!!! ");
+						record[sizeof(struct carps_doc_info_new) + info->data_len + 3] = '\x0';
+						printf("Title: '%s'\n", record + sizeof(struct carps_doc_info_new) + 3);
+						break;
+					}
+					case CARPS_DOC_INFO_USER: {
+						u16 unknown = be16_to_cpu(*(u16 *)info->data);
+						if (unknown != 0x11)
+							printf("!!!!!!!! ");
+						record[sizeof(struct carps_doc_info_new) + info->data_len + 3] = '\x0';
+						printf("User: '%s'\n", record + sizeof(struct carps_doc_info_new) + 3);
+						break;
+					}
+					case CARPS_DOC_INFO_TIME:
+						print_time((void *)info->data);
+						break;
+					default:
+						printf("Unknown: type=0x%x, data_len=0x%x: ", type, data_len);
+						dump_data(info->data, data_len);
+						break;
+				}
+				record += sizeof(struct carps_doc_info_new) + data_len;
 			}
 			break;
 		}
@@ -531,8 +616,8 @@ int main(int argc, char *argv[]) {
 			printf("\n");
 			break;
 		case CARPS_BLOCK_PRINT:
-			printf("PRINT DATA 0x%02x", data[0]);
-			decode_print_data(data, len, f, fout);
+			printf("PRINT DATA 0x%02x ", data[0]);
+			decode_print_data(data, len, f, &fout);
 			break;
 		default:
 			printf("UNKNOWN BLOCK 0x%02x !!!!!!!!\n", header->block_type);
@@ -541,17 +626,10 @@ int main(int argc, char *argv[]) {
 		}
 	}
 
-	/* now we know line count so we can fill it in */
-	if (output_header) {
-		fseek(fout, height_pos, SEEK_SET);
-		fprintf(fout, "%4d", line_num);
-	}
-
 	free(cur_line);
 	for (int i = 0; i < 8; i++)
 		free(last_lines[i]);
 
-	fclose(fout);
 	fclose(f);
 	return 0;
 }

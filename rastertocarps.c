@@ -12,6 +12,7 @@
 #include <cups/ppd.h>
 #include <cups/raster.h>
 #include "carps.h"
+#include "tiffio.h"
 
 //#define DEBUG
 //#define PBM
@@ -267,7 +268,7 @@ struct print_encoder encoders[] = {
 	{ .name = "previous[7]", .get_count = count_prev, .encode = encode_prev, .param = 7 },
 };
 
-u16 encode_print_data(int *num_lines, bool last, FILE *f, cups_raster_t *ras, char *out) {
+u16 encode_print_data_canon(int *num_lines, bool last, FILE *f, cups_raster_t *ras, char *out) {
 	u8 bitpos = 0;
 	u16 len = 0;
 	int line_num = 0;
@@ -374,45 +375,141 @@ u16 encode_print_data(int *num_lines, bool last, FILE *f, cups_raster_t *ras, ch
 	return len;
 }
 
-int encode_print_block(int height, FILE *f, cups_raster_t *ras) {
-	int num_lines = 65536 / line_len;
-	int ofs;
-	bool last = false;
-	char buf[BUF_SIZE], buf2[BUF_SIZE];
-	char *buf_pos;
+struct g4_client_data {
+	bool do_writes;
+	char *out;
+	int pos;
+};
 
-	if (num_lines > height) {
-		DBG("num_lines := %d\n", height);
-		num_lines = height;
-		last = true;
+tmsize_t g4_write(thandle_t handle, void *buf, tmsize_t count) {
+	struct g4_client_data *g4 = handle;
+
+	if (g4->do_writes) {
+		memcpy(g4->out + g4->pos, buf, count);
+		g4->pos += count;
+	}
+
+	return count;
+}
+
+tmsize_t dummy_read(__attribute__((unused)) thandle_t handle, __attribute__((unused)) void *buf, __attribute__((unused)) tmsize_t count) {
+	return 0;
+}
+
+toff_t dummy_seek(__attribute__((unused)) thandle_t handle, __attribute__((unused)) toff_t offset, __attribute__((unused)) int whence) {
+	return 0;
+}
+
+int dummy_close(__attribute__((unused)) thandle_t handle) {
+	return 0;
+}
+
+toff_t dummy_size(__attribute__((unused)) thandle_t handle) {
+	return 0;
+}
+
+/* (ab)use LibTIFF to produce raw G4 output into memory */
+u32 encode_print_data_g4(FILE *f, cups_raster_t *ras, char *out) {
+	struct g4_client_data g4 = { .do_writes = false, .out = out };
+	/* open for write, disable MMIO */
+	TIFF *tif = TIFFClientOpen("", "wm", &g4, dummy_read, g4_write, dummy_seek, dummy_close, dummy_size, NULL, NULL);
+	if (!tif)
+		return 0;
+
+	TIFFSetField(tif, TIFFTAG_IMAGEWIDTH, width);
+	TIFFSetField(tif, TIFFTAG_SAMPLESPERPIXEL, 1);
+	TIFFSetField(tif, TIFFTAG_BITSPERSAMPLE, 1);
+	TIFFSetField(tif, TIFFTAG_FILLORDER, FILLORDER_LSB2MSB);
+	TIFFSetField(tif, TIFFTAG_COMPRESSION, COMPRESSION_CCITTFAX4);
+	/* produce raw G4 data */
+	g4.do_writes = true;
+	int line = 0;
+	while ((f && !feof(f)) || (ras)) {
+		memset(cur_line, 0, line_len);
+		if (ras) {
+			DBG("cupsRasterReadPixels(%p, %p, %d)\n", ras, cur_line, line_len_file);
+			if (cupsRasterReadPixels(ras, cur_line, line_len_file) == 0)
+				break;
+		} else
+			fread(cur_line, 1, line_len_file, f);
+		if (TIFFWriteScanline(tif, cur_line, line++, 0) != 1)
+			break;
+	}
+	TIFFFlushData(tif);
+	g4.do_writes = false;
+	/* closing would write data but we discard it */
+	TIFFClose(tif);
+
+	return g4.pos;
+}
+
+int encode_strip(int page, int height, FILE *f, cups_raster_t *ras, enum carps_compression compression) {
+	int num_lines = height;
+	int headers_len = 1;
+	char *buf;
+	char header[MAX_DATA_LEN];
+	u32 len;
+	static int cur_page = 1;
+
+	header[0] = 0x01;
+	/* add page header at start of each page (except the first one) */
+	if (page != cur_page) {
+		cur_page = page;
+		headers_len += sprintf(header + headers_len, "\x1b[11h\x1b[?7;%d I\x1b[%d;1;0;%d;;%d;0'c", dpi, dpi, (compression == COMPRESS_G4) ? 256 : 32, (compression == COMPRESS_G4) ? 0 : 64);
 	}
 	/* encode print data first as we need the length and line count */
-	u16 len = encode_print_data(&num_lines, last, f, ras, buf2);
-	/* strip header */
-	ofs = sprintf(buf, "\x01\x1b[;%d;%d;15.P", width, num_lines);
-	/* print data header */
-	struct carps_print_header *ph = (void *)buf + ofs;
-	memset(ph, 0, sizeof(struct carps_print_header));
-	ph->one = 0x01;
-	ph->two = 0x02;
-	ph->four = 0x04;
-	ph->eight = 0x08;
-	ph->magic = 0x50;
-	ph->last = last ? 0 : 1;
-	ph->data_len = cpu_to_le16(len);
-	/* copy print data after the headers */
-	memcpy(buf + ofs + sizeof(struct carps_print_header), buf2, len);
-	len = ofs + sizeof(struct carps_print_header) + len;
-	buf[len++] = 0x80;	/* strip data end */
+	if (compression == COMPRESS_G4) {
+		/* compress entire page into a single strip */
+		/* in worst case, G4 output can be triple the size of the input + some overhead */
+		buf = malloc(line_len_file * height * 31 / 10 );
+		if (!buf) {
+			fprintf(stderr, "Memory allocation error\n");
+			return 0;
+		}
+		len = encode_print_data_g4(f, ras, buf);
+		/* strip header */
+		headers_len += sprintf(header + headers_len, "\x1b[;%d;%d;16.P", width, height);
+	} else {
+		/* compress only as much lines as fits into BUF_SIZE */
+		buf = malloc(BUF_SIZE + 1);
+		if (!buf) {
+			fprintf(stderr, "Memory allocation error\n");
+			return 0;
+		}
+		bool last = false;
+		num_lines = BUF_SIZE / line_len;
+		if (num_lines > height) {
+			DBG("num_lines := %d\n", height);
+			num_lines = height;
+			last = true;
+		}
+		len = encode_print_data_canon(&num_lines, last, f, ras, buf);
+		/* strip header */
+		headers_len += sprintf(header + headers_len, "\x1b[;%d;%d;15.P", width, num_lines);
+		/* print data header */
+		struct carps_print_header *ph = (void *)header + headers_len;
+		memset(ph, 0, sizeof(struct carps_print_header));
+		ph->one = 0x01;
+		ph->two = 0x02;
+		ph->four = 0x04;
+		ph->eight = 0x08;
+		ph->magic = 0x50;
+		ph->last = last ? 0 : 1;
+		ph->data_len = cpu_to_le16(len);
+		headers_len += sizeof(struct carps_print_header);
+		buf[len++] = 0x80;	/* add strip data end marker */
+	}
 
-	if (len <= MAX_DATA_LEN)
-		write_block(CARPS_DATA_PRINT, CARPS_BLOCK_PRINT, buf, len, stdout);
-	else {
-		/* write strip header + print data header separately */
-		write_block(CARPS_DATA_PRINT, CARPS_BLOCK_PRINT, buf, ofs + sizeof(struct carps_print_header), stdout);
-		buf_pos = buf;
-		buf_pos += ofs + sizeof(struct carps_print_header);
-		len -= ofs + sizeof(struct carps_print_header);
+	if (headers_len + len <= MAX_DATA_LEN) {
+		/* write header(s) and print data in one block */
+		memcpy(header + headers_len, buf, len);
+		write_block(CARPS_DATA_PRINT, CARPS_BLOCK_PRINT, header, headers_len + len, stdout);
+	} else {
+		/* write header(s) as a separate block */
+		write_block(CARPS_DATA_PRINT, CARPS_BLOCK_PRINT, header, headers_len, stdout);
+		/* make space for the first 0x01 byte that will be inserted */
+		char *buf_pos = buf + 1;
+		memmove(buf_pos, buf, len);
 		/* then write data blocks at most MAX_BLOCK_LEN bytes long */
 		while (len) {
 			/* insert 0x01 byte at the beginning of each continuing block */
@@ -426,6 +523,8 @@ int encode_print_block(int height, FILE *f, cups_raster_t *ras) {
 			len -= block_len;
 		}
 	}
+
+	free(buf);
 
 	return num_lines;
 }
@@ -455,7 +554,7 @@ enum carps_paper_size encode_paper_size(const char *paper_size_name) {
 		return PAPER_CUSTOM;
 }
 
-void fill_print_data_header(char *buf, unsigned int copies, unsigned int dpi, unsigned int weight, const char *paper_size_name, unsigned int paper_width, unsigned int paper_height) {
+void fill_print_data_header(char *buf, unsigned int copies, unsigned int dpi, unsigned int weight, const char *paper_size_name, unsigned int paper_width, unsigned int paper_height, enum carps_compression compression) {
 	char tmp[100];
 	enum carps_paper_size paper_size = encode_paper_size(paper_size_name);
 
@@ -492,8 +591,105 @@ void fill_print_data_header(char *buf, unsigned int copies, unsigned int dpi, un
 	sprintf(tmp, "\x1b[%dv", copies);
 	strcat(buf, tmp);
 	/* resolution and ??? */
-	sprintf(tmp, "\x1b[%d;1;0;32;;64;0'c", dpi);
+	sprintf(tmp, "\x1b[%d;1;0;%d;;%d;0'c", dpi, (compression == COMPRESS_G4) ? 256 : 32, (compression == COMPRESS_G4) ? 0 : 64);
 	strcat(buf, tmp);
+}
+
+void fill_doc_time(struct carps_time *doc_time, struct tm *tm) {
+	doc_time->year = (1900 + tm->tm_year) >> 4;
+	doc_time->year_month = ((1900 + tm->tm_year) << 4) | (tm->tm_mon + 1);
+	doc_time->day = (tm->tm_mday << 3) | tm->tm_wday;
+	doc_time->hour = tm->tm_hour;
+	doc_time->min = tm->tm_min;
+	doc_time->sec_msec = tm->tm_sec << 2;
+}
+
+void write_doc_info(char *buf, char *doc_title, char *user_name, time_t timestamp) {
+	struct carps_doc_info *info = (void *)buf;
+	struct carps_time *doc_time;
+	/* document beginning */
+	u8 begin_data[] = { 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+	write_block(CARPS_DATA_CONTROL, CARPS_BLOCK_BEGIN, begin_data, sizeof(begin_data), stdout);
+	/* document info - title */
+	info->type = cpu_to_be16(CARPS_DOC_INFO_TITLE);
+	info->unknown = cpu_to_be16(0x11);
+	info->data_len = strlen(doc_title) > 255 ? 255 : strlen(doc_title);
+	strncpy(buf + sizeof(struct carps_doc_info), doc_title, 255);
+	write_block(CARPS_DATA_CONTROL, CARPS_BLOCK_DOC_INFO, buf, sizeof(struct carps_doc_info) + strlen(doc_title), stdout);
+	/* document info - user name */
+	info->type = cpu_to_be16(CARPS_DOC_INFO_USER);
+	info->unknown = cpu_to_be16(0x11);
+	info->data_len = strlen(user_name) > 255 ? 255 : strlen(user_name);
+	strncpy(buf + sizeof(struct carps_doc_info), user_name, 255);
+	write_block(CARPS_DATA_CONTROL, CARPS_BLOCK_DOC_INFO, buf, sizeof(struct carps_doc_info) + strlen(user_name), stdout);
+	/* document info - time */
+	struct tm *tm = gmtime(&timestamp);
+	info->type = cpu_to_be16(CARPS_DOC_INFO_TIME);
+	doc_time = (void *)buf + 2;
+	memset(doc_time, 0, sizeof(struct carps_time));
+	if (timestamp)
+		fill_doc_time(doc_time, tm);
+	else {
+		/* MF5730 driver does not fill the time data, maybe because of a bug? */
+		/* Printer accepts data with time so we always fill it in. */
+		/* But we use this for test purposes so the output file does not change with time */
+		doc_time->day = 7;
+	}
+	write_block(CARPS_DATA_CONTROL, CARPS_BLOCK_DOC_INFO, buf, sizeof(struct carps_time) + 2, stdout);
+}
+
+void write_doc_info_new(char *buf, char *doc_title, char *user_name, time_t timestamp) {
+	char *ptr = buf;
+	struct carps_doc_info_new *info;
+	struct carps_time *doc_time;
+	int len;
+	/* 4 records */
+	u16 *record_count = (void *)ptr;
+	*record_count = cpu_to_be16(4);
+	ptr += 2;
+	/* unknown record */
+	info = (void *)ptr;
+	info->type = cpu_to_be16(0xf0);
+	info->data_len = cpu_to_be16(1);
+	info->data[0] = 0x01;
+	ptr += sizeof(struct carps_doc_info_new) + 1;
+	/* document info - title */
+	info = (void *)ptr;
+	info->type = cpu_to_be16(CARPS_DOC_INFO_TITLE);
+	len = strlen(doc_title) > 255 ? 255 : strlen(doc_title);
+	info->data_len = cpu_to_be16(len + 3);
+	info->data[0] = 0;
+	info->data[1] = 0x11;
+	info->data[2] = len;
+	strncpy((void *)&info->data[3], doc_title, 255);
+	ptr += sizeof(struct carps_doc_info_new) + 3 + len;
+	/* document info - user name */
+	info = (void *)ptr;
+	info->type = cpu_to_be16(CARPS_DOC_INFO_USER);
+	len = strlen(user_name) > 255 ? 255 : strlen(user_name);
+	info->data_len = cpu_to_be16(len + 3);
+	info->data[0] = 0;
+	info->data[1] = 0x11;
+	info->data[2] = len;
+	strncpy((void *)&info->data[3], user_name, 255);
+	ptr += sizeof(struct carps_doc_info_new) + 3 + len;
+	/* document info - time */
+	info = (void *)ptr;
+	info->type = cpu_to_be16(CARPS_DOC_INFO_TIME);
+	info->data_len = cpu_to_be16(sizeof(struct carps_time));
+	struct tm *tm = gmtime(&timestamp);
+	doc_time = (void *)info->data;
+	memset(doc_time, 0, sizeof(struct carps_time));
+	if (timestamp)
+		fill_doc_time(doc_time, tm);
+	else {
+		/* MF5730 driver does not fill the time data, maybe because of a bug? */
+		/* Printer accepts data with time so we always fill it in. */
+		/* But we use this for test purposes so the output file does not change with time */
+		doc_time->day = 7;
+	}
+	ptr += sizeof(struct carps_doc_info_new) + sizeof(struct carps_time);
+	write_block(CARPS_DATA_CONTROL, CARPS_BLOCK_DOC_INFO_NEW, buf, ptr - buf, stdout);
 }
 
 char *ppd_get(ppd_file_t *ppd, const char *name) {
@@ -505,15 +701,13 @@ char *ppd_get(ppd_file_t *ppd, const char *name) {
 		ppd_choice_t *choice;
 		choice = ppdFindMarkedChoice(ppd, name);
 		if (!choice)
-			return NULL;
+			return "";
 		return choice->choice;
 	}
 }
 
 int main(int argc, char *argv[]) {
 	char buf[BUF_SIZE];
-	struct carps_doc_info *info;
-	struct carps_time *doc_time;
 	struct carps_print_params params;
 	char tmp[100];
 #ifdef PBM
@@ -527,7 +721,8 @@ int main(int argc, char *argv[]) {
 	unsigned int page = 0, copies;
 	int fd;
 	ppd_file_t *ppd;
-	bool header_written = false;
+	bool new_doc_info = false;
+	enum carps_compression compression = COMPRESS_CANON;
 #ifdef PBM
 	if (argc < 2 || argc == 3 || argc == 4 || argc == 5 || argc > 7) {
 		fprintf(stderr, "usage: rastertocarps <file.pbm>\n");
@@ -589,55 +784,20 @@ int main(int argc, char *argv[]) {
 		n = cupsParseOptions(argv[5], 0, &options);
 		cupsMarkOptions(ppd, n, options);
 		cupsFreeOptions(n, options);
+
+		char *value = ppd_get(ppd, "NewDocInfo");
+		if (!strcmp(value, "1"))
+			new_doc_info = true;
+		value = ppd_get(ppd, "Compression");
+		if (!strcmp(value, "G4"))
+			compression = COMPRESS_G4;
 	}
 
-	/* document beginning */
-	u8 begin_data[] = { 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-	write_block(CARPS_DATA_CONTROL, CARPS_BLOCK_BEGIN, begin_data, sizeof(begin_data), stdout);
-	/* document info - title */
-	char *doc_title;
-	if (pbm_mode)
-		doc_title = "Untitled";
+	if (new_doc_info)
+		write_doc_info_new(buf, pbm_mode ? "Untitled" : argv[3], pbm_mode ? "root" : argv[2], pbm_mode ? 0 : time(NULL));
 	else
-		doc_title = argv[3];
-	info = (void *)buf;
-	info->type = cpu_to_be16(CARPS_DOC_INFO_TITLE);
-	info->unknown = cpu_to_be16(0x11);
-	info->data_len = strlen(doc_title) > 255 ? 255 : strlen(doc_title);
-	strncpy(buf + sizeof(struct carps_doc_info), doc_title, 255);
-	write_block(CARPS_DATA_CONTROL, CARPS_BLOCK_DOC_INFO, buf, sizeof(struct carps_doc_info) + strlen(doc_title), stdout);
-	/* document info - user name */
-	char *user_name;
-	if (pbm_mode)
-		user_name = "root";
-	else
-		user_name = argv[2];
-	info = (void *)buf;
-	info->type = cpu_to_be16(CARPS_DOC_INFO_USER);
-	info->unknown = cpu_to_be16(0x11);
-	info->data_len = strlen(user_name) > 255 ? 255 : strlen(user_name);
-	strncpy(buf + sizeof(struct carps_doc_info), user_name, 255);
-	write_block(CARPS_DATA_CONTROL, CARPS_BLOCK_DOC_INFO, buf, sizeof(struct carps_doc_info) + strlen(user_name), stdout);
-	/* document info - time */
-	time_t timestamp = time(NULL);
-	struct tm *tm = gmtime(&timestamp);
-	doc_time = (void *)buf;
-	memset(doc_time, 0, sizeof(struct carps_time));
-	doc_time->type = cpu_to_be16(CARPS_DOC_INFO_TIME);
-	if (!pbm_mode) {
-		doc_time->year = (1900 + tm->tm_year) >> 4;
-		doc_time->year_month = ((1900 + tm->tm_year) << 4) | (tm->tm_mon + 1);
-		doc_time->day = (tm->tm_mday << 3) | tm->tm_wday;
-		doc_time->hour = tm->tm_hour;
-		doc_time->min = tm->tm_min;
-		doc_time->sec_msec = tm->tm_sec << 2;
-	} else {
-		/* MF5730 driver does not fill the time data, maybe because of a bug? */
-		/* Printer accepts data with time so we always fill it in. */
-		/* But we use this for test purposes so the output file does not change with time */
-		doc_time->day = 7;
-	}
-	write_block(CARPS_DATA_CONTROL, CARPS_BLOCK_DOC_INFO, buf, sizeof(struct carps_time), stdout);
+		write_doc_info(buf, pbm_mode ? "Untitled" : argv[3], pbm_mode ? "root" : argv[2], pbm_mode ? 0 : time(NULL));
+
 	/* begin 1 */
 	memset(buf, 0, 4);
 	write_block(CARPS_DATA_CONTROL, CARPS_BLOCK_BEGIN1, buf, 4, stdout);
@@ -687,30 +847,29 @@ int main(int argc, char *argv[]) {
 			width = page_header.cupsWidth;
 			dpi = page_header.HWResolution[0];
 			DBG("line_len_file=%d,line_len=%d height=%d width=%d", line_len_file, line_len, height, width);
-			if (!header_written) {	/* print data header */
+			if (page == 1) {	/* print data header */
 				char *page_size_name = page_header.cupsPageSizeName;
 				/* get page size name from PPD if cupsPageSizeName is empty */
 				if (strlen(page_size_name) == 0)
 					page_size_name = ppd_get(ppd, "PageSize");
-				fill_print_data_header(buf, copies, dpi, page_header.cupsMediaType, page_size_name, page_header.PageSize[0], page_header.PageSize[1]);
+				fill_print_data_header(buf, copies, dpi, page_header.cupsMediaType, page_size_name, page_header.PageSize[0], page_header.PageSize[1], compression);
 				write_block(CARPS_DATA_PRINT, CARPS_BLOCK_PRINT, buf, strlen(buf), stdout);
-				header_written = true;
 			}
 
-			/* read raster data */
+			/* encode print data in strips */
 			while (height > 0)
-				height -= encode_print_block(height, NULL, ras);
+				height -= encode_strip(page, height, NULL, ras, compression);
 			/* end of page */
 			u8 page_end[] = { 0x01, 0x0c };
 			write_block(CARPS_DATA_PRINT, CARPS_BLOCK_PRINT, page_end, sizeof(page_end), stdout);
 		}
 	} else {
 		/* print data header */
-		fill_print_data_header(buf, 1, 600, WEIGHT_PLAIN, "A4", 0, 0);	/* 1 copy, 600 dpi, plain paper, A4 */
+		fill_print_data_header(buf, 1, 600, WEIGHT_PLAIN, "A4", 0, 0, COMPRESS_CANON);	/* 1 copy, 600 dpi, plain paper, A4 */
 		write_block(CARPS_DATA_PRINT, CARPS_BLOCK_PRINT, buf, strlen(buf), stdout);
-		/* print data */
+		/* encode print data in strips */
 		while (!feof(f) && height > 0)
-			height -= encode_print_block(height, f, NULL);
+			height -= encode_strip(1, height, f, NULL, compression);
 		/* end of page */
 		u8 page_end[] = { 0x01, 0x0c };
 		write_block(CARPS_DATA_PRINT, CARPS_BLOCK_PRINT, page_end, sizeof(page_end), stdout);
