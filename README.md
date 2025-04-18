@@ -32,7 +32,7 @@ MF8100 Series			| not supported - different data format, color
 
 Compiling from source
 ---------------------
-Requirements: make, gcc (Xcode Commandline Tools)
+Requirements: make, gcc (Xcode Commandline Tools), libtiff (HomeBrew)
 
 To compile, simply run "make":
 
