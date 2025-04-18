@@ -1,5 +1,20 @@
-CFLAGS=-Wall -Wextra --std=c99 -O2
-CUPSDIR=$(shell cups-config --serverbin)
+UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
+
+# check if we are on Apple Silicon
+HOMEBREW := /opt/homebrew
+
+ifeq ($(UNAME_S),Darwin)
+  ifeq ($(UNAME_M),arm64)
+    ifeq ($(wildcard $(HOMEBREW)/include),$(HOMEBREW)/include)
+      CFLAGS += -I$(HOMEBREW)/include
+      LDFLAGS += -L$(HOMEBREW)/lib
+    endif
+  endif
+endif
+
+CFLAGS += -Wall -Wextra --std=c99 -O2
+CUPSDIR := $(shell cups-config --serverbin)
 
 all:	carps-decode rastertocarps ppd/*.ppd
 
@@ -7,7 +22,7 @@ carps-decode:	carps-decode.c carps.h
 	gcc $(CFLAGS) carps-decode.c -o carps-decode
 
 rastertocarps:	rastertocarps.c carps.h
-	gcc $(CFLAGS) rastertocarps.c -o rastertocarps -lcupsimage -lcups -ltiff
+	gcc $(CFLAGS) $(LDFLAGS) rastertocarps.c -o rastertocarps -lcupsimage -lcups -ltiff
 
 ppd/*.ppd: carps.drv
 	ppdc carps.drv
