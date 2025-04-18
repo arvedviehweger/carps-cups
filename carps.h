@@ -1,7 +1,9 @@
 /* CUPS driver for Canon CARPS printers */
 /* Copyright (c) 2014 Ondrej Zary */
-#define u8 unsigned char
-#define u16 unsigned short
+#include <stdint.h>
+#define u8 uint8_t
+#define u16 uint16_t
+#define u32 uint32_t
 
 #define POINTS_PER_INCH 72
 
@@ -57,6 +59,7 @@ struct carps_header {
 #define CARPS_BLOCK_PARAMS	0x18
 #define CARPS_BLOCK_END2	0x19
 #define CARPS_BLOCK_PRINT	0x1a
+#define CARPS_BLOCK_DOC_INFO_NEW	0x6b
 
 struct carps_doc_info {
 	u16 type;
@@ -67,8 +70,13 @@ struct carps_doc_info {
 #define CARPS_DOC_INFO_USER	0x0006
 #define CARPS_DOC_INFO_TIME	0x0009
 
+struct carps_doc_info_new {
+	u16 type;
+	u16 data_len;
+	u8 data[];
+} __attribute__((packed));
+
 struct carps_time {
-	u16 type;	/* 0x0009 */
 	u8 year;
 	u8 year_month;
 	u8 day;
@@ -126,6 +134,11 @@ enum carps_paper_size {
 	PAPER_ENV_DL	= 64,
 	PAPER_ENV_C5	= 66,
 	PAPER_CUSTOM	= 80,
+};
+
+enum carps_compression {
+	COMPRESS_CANON	= 15,
+	COMPRESS_G4	= 16,
 };
 
 const char *bin_n(u16 x, u8 n) {
