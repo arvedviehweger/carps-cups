@@ -1,11 +1,12 @@
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
 
-# check if we are on Apple Silicon
-HOMEBREW := /opt/homebrew
+HOMEBREW := /usr/local
 
+# check if we are on Apple Silicon
 ifeq ($(UNAME_S),Darwin)
   ifeq ($(UNAME_M),arm64)
+  HOMEBREW := /opt/homebrew
     ifeq ($(wildcard $(HOMEBREW)/include),$(HOMEBREW)/include)
       CFLAGS += -I$(HOMEBREW)/include
       LDFLAGS += -L$(HOMEBREW)/lib
