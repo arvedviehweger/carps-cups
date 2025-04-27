@@ -15,6 +15,7 @@ endif
 
 CFLAGS += -Wall -Wextra --std=c99 -O2
 CUPSDIR := $(shell cups-config --serverbin)
+LIBTIFF := $(HOMEBREW)/lib/libtiff.a $(HOMEBREW)/lib/libjpeg.a $(HOMEBREW)/lib/libzstd.a $(HOMEBREW)/lib/liblzma.a 
 
 all:	carps-decode rastertocarps ppd/*.ppd
 
@@ -22,7 +23,7 @@ carps-decode:	carps-decode.c carps.h
 	gcc $(CFLAGS) carps-decode.c -o carps-decode
 
 rastertocarps:	rastertocarps.c carps.h
-	gcc $(CFLAGS) $(LDFLAGS) rastertocarps.c -o rastertocarps -lcupsimage -lcups -ltiff
+	gcc $(CFLAGS) rastertocarps.c $(LIBTIFF) -o rastertocarps $(LDFLAGS) -lcupsimage -lcups -lz
 
 ppd/*.ppd: carps.drv
 	ppdc carps.drv
