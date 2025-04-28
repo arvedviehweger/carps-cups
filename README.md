@@ -32,7 +32,12 @@ MF8100 Series			| not supported - different data format, color
 
 Compiling from source
 ---------------------
-Requirements: make, gcc (Xcode Commandline Tools), libtiff (HomeBrew)
+Requirements: gcc (Xcode Commandline Tools), HomeBrew
+
+To install the dependencies:
+
+    $ brew install jpeg libtiff zstd xz
+
 
 To compile, simply run "make":
 
@@ -45,3 +50,12 @@ To install the compiled driver, run:
 You can then install the printer using System Preferences.
 
 ![Screenshot](screenshot.png)
+
+
+Paper size problems
+-------------------
+CARPS printers are very sensitive to paper size.
+
+If only one page prints and the printer LCD shows "check paper size" or no pages are printed until you power cycle the printer, make sure the paper size you have set in the driver/document/application matches the size set on printer panel (LCD menus).
+
+In some cases it's recommended to set scaling to 95%.
