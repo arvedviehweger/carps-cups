@@ -5,8 +5,6 @@ Version ""
 
 Filter application/vnd.cups-raster 100 rastertocarps
 
-HWMargins 14.25 14.25 14.25 14.25
-
 *MediaSize Letter
 MediaSize Legal
 MediaSize Executive
@@ -117,7 +115,7 @@ Throughput 18
 	Attribute NewDocInfo "" 1
 	Throughput 21
 	ModelName "MF3200 Series"
-	PCFileName "mf3200.ppd"
+	PCFileName "canon_mf3200.ppd"
 }
 
 /* not supported:
