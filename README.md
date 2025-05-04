@@ -58,4 +58,4 @@ CARPS printers are very sensitive to paper size.
 
 If only one page prints and the printer LCD shows "check paper size" or no pages are printed until you power cycle the printer, make sure the paper size you have set in the driver/document/application matches the size set on printer panel (LCD menus).
 
-In some cases it's recommended to set scaling to 95%.
+~~In some cases it's recommended to set scaling to 95%.~~ -> fixed with macOS specific ppd patches (caused by a bug in ppdc)
