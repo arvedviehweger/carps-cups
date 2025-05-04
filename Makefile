@@ -21,10 +21,10 @@ LIBTIFF := $(HOMEBREW)/lib/libtiff.a $(HOMEBREW)/lib/libjpeg.a $(HOMEBREW)/lib/l
 all:	carps-decode rastertocarps ppd/*.ppd
 
 carps-decode:	carps-decode.c carps.h
-	gcc $(CFLAGS) carps-decode.c -o carps-decode
+	gcc $(CFLAGS) carps-decode.c -o carps-decode -w
 
 rastertocarps:	rastertocarps.c carps.h
-	gcc $(CFLAGS) rastertocarps.c $(LIBTIFF) -o rastertocarps $(LDFLAGS) -lcupsimage -lcups -lz
+	gcc $(CFLAGS) rastertocarps.c $(LIBTIFF) -o rastertocarps $(LDFLAGS) -lcupsimage -lcups -lz -w
 
 ppd/*.ppd: carps.drv
 	ppdc carps.drv
